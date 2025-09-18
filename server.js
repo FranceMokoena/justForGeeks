@@ -17,7 +17,7 @@ app.get('/sassa', async (req, res) => {
   if (!saId) return res.status(400).json({ error: 'Missing SA ID' });
 
   try {
-    const response = await fetch('https://srd.sassa.gov.za/srdweb/api/web/outcome', {
+    const response = await fetch('https://www.hippo.co.za/car-insurance-quote/api/getPersonalDetails', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ idnumber: saId })
