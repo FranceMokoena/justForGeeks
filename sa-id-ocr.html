@@ -1,0 +1,191 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SA ID OCR Validator + SASSA Check</title>
+
+<!-- Tesseract.js for OCR -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+<!-- PDF.js for PDF support -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+</script>
+
+<style>
+  body { font-family: Arial, sans-serif; margin: 20px; }
+  #preview { max-width: 300px; margin-top: 10px; display: none; }
+  pre { background: #f4f4f4; padding: 10px; border-radius: 6px; }
+  table { border-collapse: collapse; margin-top: 10px; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; }
+</style>
+</head>
+<body>
+
+<h2>SA ID OCR & SASSA Grant Checker</h2>
+
+<label>Enter your SA ID number manually:</label><br>
+<input id="typedId" placeholder="13-digit ID" maxlength="13"><br><br>
+
+<label>OR upload your ID (image/PDF):</label><br>
+<input type="file" id="fileInput" accept="image/*,.pdf"><br>
+<img id="preview"><br><br>
+
+<button onclick="runOCR()">Run OCR & Check SASSA</button>
+
+<h3>Results:</h3>
+<pre id="output">No scan yet.</pre>
+<div id="grantResults"></div>
+
+<script>
+// Fuzzy matching
+function fuzzyMatch(id, ocrDigits) {
+  return ocrDigits.includes(id) || ocrDigits.includes(id.slice(0, id.length-1));
+}
+
+// Preprocess image (grayscale + threshold)
+function preprocessImage(img) {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = img.width;
+  canvas.height = img.height;
+  ctx.drawImage(img, 0, 0);
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  for (let i = 0; i < imgData.data.length; i += 4) {
+    const avg = (imgData.data[i] + imgData.data[i+1] + imgData.data[i+2])/3;
+    const val = avg < 128 ? 0 : 255;
+    imgData.data[i] = imgData.data[i+1] = imgData.data[i+2] = val;
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return canvas.toDataURL();
+}
+
+// SA ID validator
+function validateSAID(id) {
+  if(!/^\d{13}$/.test(id)) return {valid: false, reason: 'ID must be 13 digits'};
+  
+  const yy = parseInt(id.slice(0,2),10);
+  const mm = parseInt(id.slice(2,4),10);
+  const dd = parseInt(id.slice(4,6),10);
+  const currentYear = new Date().getFullYear() % 100;
+  const century = yy > currentYear ? 1900 : 2000;
+  const dob = new Date(century+yy, mm-1, dd);
+  if(dob.getMonth()+1 !== mm || dob.getDate() !== dd) return {valid: false, reason: 'Invalid DOB'};
+  
+  const genderCode = parseInt(id.slice(6,10),10);
+  const gender = genderCode < 5000 ? 'Female' : 'Male';
+  const citizenship = id[10] === '0' ? 'SA Citizen' : id[10]==='1' ? 'Permanent Resident' : 'Invalid citizenship digit';
+  if(citizenship.startsWith('Invalid')) return {valid:false, reason:'Invalid citizenship digit'};
+  
+  const digits = id.split('').map(d=>parseInt(d,10));
+  let sum = 0;
+  for(let i=0;i<12;i++){
+    if(i%2===0) sum += digits[i];
+    else {
+      let dbl = digits[i]*2;
+      sum += (dbl>9?dbl-9:dbl);
+    }
+  }
+  const checkDigit = (10 - (sum % 10))%10;
+  if(checkDigit !== digits[12]) return {valid:false, reason:'Invalid checksum'};
+  
+  return {valid:true, dob: dob.toISOString().slice(0,10), gender, citizenship};
+}
+
+const fileInput = document.getElementById('fileInput');
+const preview = document.getElementById('preview');
+
+fileInput.addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if(file.type.startsWith('image/')) {
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      preview.src = ev.target.result;
+      preview.style.display = 'block';
+    };
+    reader.readAsDataURL(file);
+  } else if(file.type === 'application/pdf') {
+    preview.style.display = 'none';
+  }
+});
+
+async function runOCR() {
+  const file = fileInput.files[0];
+  let saId = document.getElementById('typedId').value.trim();
+
+  document.getElementById('output').textContent = 'Processing... ⏳';
+  document.getElementById('grantResults').innerHTML = '';
+
+  let extractedDigits = '';
+
+  if(file) {
+    let imageDataURL;
+    if(file.type.startsWith('image/')) {
+      const img = new Image();
+      img.src = URL.createObjectURL(file);
+      await new Promise(res => img.onload = res);
+      imageDataURL = preprocessImage(img);
+      preview.src = imageDataURL;
+      preview.style.display = 'block';
+    } else if(file.type === 'application/pdf') {
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
+      const page = await pdf.getPage(1);
+      const viewport = page.getViewport({scale: 2});
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      await page.render({canvasContext: ctx, viewport: viewport}).promise;
+      imageDataURL = preprocessImage(canvas);
+      preview.src = imageDataURL;
+      preview.style.display = 'block';
+    }
+
+    const { data: { text } } = await Tesseract.recognize(imageDataURL, 'eng', {logger: m => console.log(m)});
+    extractedDigits = text.replace(/\D/g, '');
+    if(!saId) saId = extractedDigits; // fallback if manual ID empty
+  }
+
+  const match = fuzzyMatch(saId, extractedDigits);
+  const validation = validateSAID(saId);
+
+  document.getElementById('output').textContent = JSON.stringify({
+    typedId: saId,
+    extractedDigits,
+    match,
+    validation
+  }, null, 2);
+
+  // Fetch SASSA grant status if SA ID valid
+  if(validation.valid) {
+    try {
+      const res = await fetch(`https://justforgeeks.onrender.com/sassa?saId=${saId}`);
+      const data = await res.json();
+      if(data.outcomes && data.outcomes.length > 0){
+        let table = '<table><tr><th>Period</th><th>Outcome</th><th>Reason</th><th>Filed</th><th>Payday</th><th>Paid</th></tr>';
+        data.outcomes.forEach(o=>{
+          table += `<tr>
+            <td>${o.period||'-'}</td>
+            <td>${o.outcome||'-'}</td>
+            <td>${o.reason||'-'}</td>
+            <td>${o.filed||'-'}</td>
+            <td>${o.payday||'-'}</td>
+            <td>${o.paid||'-'}</td>
+          </tr>`;
+        });
+        table += '</table>';
+        document.getElementById('grantResults').innerHTML = table;
+      } else {
+        document.getElementById('grantResults').textContent = 'No SASSA data found.';
+      }
+    } catch(err) {
+      document.getElementById('grantResults').textContent = 'Error fetching SASSA data: '+err.message;
+    }
+  }
+}
+</script>
+</body>
+</html>
